@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Shiftbound</title>
+<style>
+html,body{margin:0;height:100%;background:#05060c;overflow:hidden;font-family:Georgia,'Times New Roman',serif;color:#dfe9f0;user-select:none}
+canvas{position:absolute}
+.ov{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;text-align:center;background:rgba(5,6,12,.8);padding:24px}
+.ov.on{display:flex}
+h1{font-size:68px;letter-spacing:12px;margin:0 0 10px;color:#8ff0e2;text-shadow:-3px 0 #e040d0,3px 0 #3ad}
+h2{margin:0 0 12px;font-size:30px;color:#e2b8ff}
+p{max-width:540px;line-height:1.65;margin:8px 0;color:#b9c7d3;font-size:18px}
+p.k{font-size:14px;color:#7f93a3;margin-top:26px}
+button{font:inherit;font-size:18px;margin:8px;padding:10px 30px;background:#101a24;color:#8ff0e2;border:2px solid #8ff0e2;cursor:pointer}
+button:hover,button:focus{background:#8ff0e2;color:#05060c;outline:none}
+#hud{position:absolute;display:none;justify-content:space-between;padding:10px 16px;box-sizing:border-box;pointer-events:none;font-size:15px;text-shadow:0 1px 3px #000}
+#hud>div:last-child{text-align:right}
+#hud button{pointer-events:auto;font-size:13px;padding:3px 12px;margin:4px 0 0}
+#hh{opacity:.7;font-size:13px}
+</style></head><body>
+<canvas id="c"></canvas>
+<div id="hud"><div><b id="hn"></b><br><span id="hh"></span></div><div><span id="hd"></span><br><span id="hf"></span><br><button id="bp" tabindex="-1">Pause (Esc)</button></div></div>
+<div class="ov on" id="title"><h1>SHIFTBOUND</h1><p>Kael wakes in a village with no one in it. The sky flickers between two worlds, and he can step between them.</p><button id="bs">Start</button><p class="k">A / D or Left / Right: move &nbsp; W, Space or Up: jump &nbsp; Q or E: shift worlds<br>R: restart level &nbsp; Esc: pause</p></div>
+<div class="ov" id="story"><h2 id="st"></h2><p id="sx"></p><button id="bc">Continue</button></div>
+<div class="ov" id="pause"><h2>Paused</h2><button id="br">Resume</button><button id="bq">Restart level</button></div>
+<div class="ov" id="over"><h2>Kael falls</h2><p id="om"></p><button id="bt">Retry</button></div>
+<div class="ov" id="end"><h2>The Heart</h2><p id="et"></p><p id="es"></p><button id="ba">Play Again</button></div>
+<script>
+"use strict";
+// ===== Configuration and input =====
+const W=960,H=544,T=32,GRAV=1800,SPEED=220,JUMP=620;
+const $=id=>document.getElementById(id),cv=$('c'),ctx=cv.getContext('2d');
+const hash=n=>{const s=Math.sin(n*127.1+311.7)*43758.5;return s-Math.floor(s)};
+const hit=(a,b)=>a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;
+let state='title',lvl=0,L,P,dim=0,cam=0,tm=0,flash=0,flashC='#fff',rej=0,ring=null,parts=[],jumpBuf=0,winT=0,deadT=0,rv=0,AC;
+const keys={},got=[0,0,0,0];
+function resize(){const w=innerWidth,h=innerHeight,s=Math.min(w/W,h/H),d=devicePixelRatio||1;
+ for(const e of [cv,$('hud')]){e.style.width=W*s+'px';e.style.height=H*s+'px';e.style.left=(w-W*s)/2+'px';e.style.top=(h-H*s)/2+'px'}
+ cv.width=W*s*d;cv.height=H*s*d;ctx.setTransform(s*d,0,0,s*d,0,0)}
+addEventListener('resize',resize);
+addEventListener('keydown',e=>{const c=e.code;
+ if(state==='play'&&['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(c))e.preventDefault();
+ if(e.repeat)return;keys[c]=1;audioInit();
+ if(state==='play'){
+  if(c==='KeyW'||c==='Space'||c==='ArrowUp')jumpBuf=.12;
+  if(c==='KeyQ'||c==='KeyE')switchDim();
+  if(c==='KeyR')loadLevel(lvl);
+  if(c==='Escape')setState('pause');
+ }else if(state==='pause'&&c==='Escape')setState('play');
+ else if(state==='over'&&c==='KeyR')retry();});
+addEventListener('keyup',e=>keys[e.code]=0);
+addEventListener('blur',()=>{for(const k in keys)keys[k]=0;if(state==='play')setState('pause')});
+addEventListener('pointerdown',audioInit);
+// Web Audio tones: created lazily after the first user input
+function audioInit(){if(!AC)try{AC=new(window.AudioContext||window.webkitAudioContext)()}catch(e){}}
+function tone(f,d,type='square',v=.05,f2){if(!AC)return;try{const o=AC.createOscillator(),g=AC.createGain(),t=AC.currentTime;o.type=type;o.frequency.setValueAtTime(f,t);if(f2)o.frequency.exponentialRampToValueAtTime(f2,t+d);g.gain.setValueAtTime(v,t);g.gain.exponentialRampToValueAtTime(.001,t+d);o.connect(g);g.connect(AC.destination);o.start(t);o.stop(t+d)}catch(e){}}
+
+// ===== Level data =====
+// Rects [x,y,w,h] and spikes [x,y,w] are in tiles. B = solid in both worlds, A = Awake only, F = Fractured only.
+// sA/sF spikes per world, fr = memory fragments, dr = falling rocks, cp = checkpoints (feet position).
+const LV=[
+{name:'The Silent Village',w:64,start:[2,13],exit:[61,11],hint:'Some walls exist in only one world. Press Q or E to shift.',
+ B:[[0,13,22,4],[35,13,29,4],[48,11,3,1]],A:[[12,9,2,4],[25,12,3,1]],F:[[30,12,3,1]],
+ sA:[[44,12,2]],sF:[],fr:[[49,9],[26,10],[31,10]],dr:[],cp:[]},
+{name:'The Broken Bridge',w:100,start:[2,13],exit:[96,11],hint:'Shift in mid-air to land on the other world\'s platforms.',
+ B:[[0,13,10,4],[76,13,24,4]],
+ A:[[12,12,5,1],[26,12,5,1],[40,11,5,1],[54,12,5,1],[68,12,5,1]],
+ F:[[19,11,5,1],[33,10,5,1],[47,12,5,1],[61,11,5,1]],
+ sA:[[28,11,1],[42,10,1],[56,11,1]],sF:[[21,10,1],[35,9,1],[49,11,1],[63,10,1]],
+ fr:[[14,10],[21,9],[35,8],[49,10],[63,9],[70,10]],dr:[[15,1],[23,1],[44,1],[51,1],[58,1],[71,1]],cp:[[78,13]]},
+{name:'The Sunken Ruins',w:104,start:[2,13],exit:[99,7],hint:'Plan your shifts before you jump.',
+ B:[[0,13,8,4],[30,9,6,8],[50,13,18,4],[93,9,11,8]],
+ A:[[10,12,3,1],[20,10,3,1],[38,10,2,1],[46,12,2,1],[58,8,2,5],[69,12,4,1],[81,10,4,1]],
+ F:[[15,11,3,1],[25,9,3,1],[42,11,2,1],[75,11,4,1],[87,9,4,1]],
+ sA:[[70,11,1],[82,9,1]],sF:[[56,12,3],[76,10,1],[88,8,1]],
+ fr:[[11,10],[16,9],[26,7],[33,7],[43,9],[62,11],[77,9],[89,7]],dr:[],cp:[[32,9],[52,13]]},
+{name:'The Heart',w:112,start:[2,13],exit:[106,5],hint:'Reach the Heart.',
+ B:[[0,13,8,4],[46,13,17,4],[94,7,18,10]],
+ A:[[10,12,4,1],[22,10,4,1],[34,10,4,1],[50,8,2,5],[69,11,3,1],[79,9,3,1],[89,7,3,1],[100,2,2,5]],
+ F:[[16,11,4,1],[28,9,4,1],[40,11,4,1],[57,8,2,5],[64,12,3,1],[74,10,3,1],[84,8,3,1]],
+ sA:[[24,9,1],[36,9,1],[60,12,1]],sF:[[18,10,1],[30,8,1],[42,10,1],[53,12,2],[97,6,3]],
+ fr:[[12,10],[30,6],[54,10],[61,10],[76,8],[86,6],[91,5],[104,5]],dr:[[12,1],[29,1],[41,1],[66,1],[85,1],[90,1]],cp:[[48,13],[96,7]]}
+];
+const STORY=['The village was never empty. It exists twice, in two realities, and Kael can step between them.',
+'The catastrophe was an attempt to preserve the world. In holding it still, the makers tore it in two.',
+'Beneath the ruins, something still beats. The Heart is active, and it is calling to Kael.'];
+const TOT=LV.reduce((a,l)=>a+l.fr.length,0);
+const px=a=>a.map(([x,y,w,h])=>({x:x*T,y:y*T,w:w*T,h:h*T}));
+function loadLevel(i){lvl=i;const d=LV[i];L={...d,w:d.w*T};
+ L.A=px(d.A);L.F=px(d.F);L.B=px(d.B);L.solid=[L.B.concat(L.A),L.B.concat(L.F)];
+ L.spk=[d.sA,d.sF].map(a=>a.map(([x,y,n])=>({x:x*T+3,y:y*T+12,w:n*T-6,h:T-12,tx:x*T,ty:y*T,n})));
+ L.fr=d.fr.map(([x,y])=>({x:x*T+16,y:y*T+16,got:0}));
+ L.dr=d.dr.map(([x,y])=>({x:x*T+6,y:y*T,y0:y*T,vy:0,on:0,t:0}));
+ L.cp=d.cp.map(([x,y])=>({x:x*T,y:y*T,on:0}));
+ L.ex={x:d.exit[0]*T,y:d.exit[1]*T,w:T,h:2*T};
+ L.sp={x:d.start[0]*T+6,y:d.start[1]*T-28};got[i]=0;rv=0;
+ P={x:0,y:0,w:20,h:28,vx:0,vy:0,g:0,coy:0,face:1};respawn();cam=Math.max(0,Math.min(L.w-W,P.x-W/2));
+ $('hn').textContent='Level '+(i+1)+': '+d.name;$('hh').textContent=d.hint}
+function respawn(){P.x=L.sp.x;P.y=L.sp.y;P.vx=P.vy=0;dim=0;L.dr.forEach(d=>{d.on=0;d.y=d.y0;d.vy=0})}
+
+// ===== Player physics + collision =====
+function play(dt){
+ const dir=(keys.KeyD||keys.ArrowRight?1:0)-(keys.KeyA||keys.ArrowLeft?1:0),hold=keys.KeyW||keys.Space||keys.ArrowUp,wasG=P.g;
+ P.vx+=(dir*SPEED-P.vx)*Math.min(1,dt*(P.g?20:9));if(dir)P.face=dir;
+ P.coy=P.g?.1:P.coy-dt;jumpBuf-=dt;
+ if(jumpBuf>0&&P.coy>0){P.vy=-JUMP;P.coy=0;jumpBuf=0;tone(380,.15,'square',.05,720);burst(P.x+10,P.y+28,'#9ab',5,60)} // coyote time + buffer; coy=0 blocks air jumps
+ if(!hold&&P.vy<-300)P.vy=-300; // release early = short hop
+ P.vy=Math.min(P.vy+GRAV*dt,900);
+ const S=L.solid[dim];
+ P.x=Math.max(0,Math.min(L.w-P.w,P.x+P.vx*dt)); // resolve X first, then Y
+ for(const s of S)if(hit(P,s)){P.x=P.vx>0?s.x-P.w:s.x+s.w;P.vx=0}
+ P.g=0;P.y+=P.vy*dt;
+ for(const s of S)if(hit(P,s)){if(P.vy>0){P.y=s.y-P.h;P.g=1}else P.y=s.y+s.h;P.vy=0}
+ if(P.g&&!wasG)burst(P.x+10,P.y+28,'#9ab',4,50);
+ if(P.y>H+60)return die('You fell into the void.');
+ for(const s of L.spk[dim])if(hit(P,s))return die('The spikes were waiting.');
+ for(const d of L.dr){
+  if(d.on===0){if(Math.abs(P.x-d.x)<80&&P.y>d.y0)d.on=1}
+  else if(d.on===1){d.vy+=1100*dt;d.y+=d.vy*dt;const r={x:d.x,y:d.y,w:20,h:26};
+   if(hit(P,r))return die('A shard of the ceiling fell.');
+   if(d.y>H||S.some(s=>hit(r,s))){burst(d.x+10,Math.min(d.y+26,H),'#aab',10);d.on=2;d.t=2}}
+  else if((d.t-=dt)<=0){d.on=0;d.y=d.y0;d.vy=0}}
+ for(const f of L.fr)if(!f.got&&Math.hypot(f.x-P.x-10,f.y-P.y-14)<26){f.got=1;got[lvl]++;tone(880,.12,'triangle',.06);setTimeout(()=>tone(1320,.18,'triangle',.06),90);burst(f.x,f.y,'#ffe08a',10)}
+ for(const c of L.cp)if(!c.on&&hit(P,{x:c.x-8,y:c.y-64,w:48,h:64})){c.on=1;L.sp={x:c.x+6,y:c.y-28};tone(520,.2,'sine',.06);burst(c.x+16,c.y-27,'#fff',12)}
+ if(lvl===3&&!L.rv&&P.x>93*T){L.rv=1;flash=.8;flashC='#ff9ae6';tone(70,1.5,'sine',.12,300)} // final reveal
+ if(hit(P,L.ex))win();
+}
+
+// ===== Dimension switching =====
+function switchDim(){const n=1-dim,b={x:P.x+1,y:P.y+1,w:P.w-2,h:P.h-2};
+ if(L.solid[n].some(s=>hit(b,s))){rej=.4;tone(110,.2,'square',.07);burst(P.x+10,P.y+14,'#ff5a6a',8);return} // would overlap a solid: reject
+ dim=n;flash=.35;flashC=dim?'#d070ff':'#8ff0e2';ring={x:P.x+10,y:P.y+14,r:0};tone(220,.25,'sine',.09,700);burst(P.x+10,P.y+14,flashC,18,160)}
+
+// ===== Game state and UI =====
+function setState(s){state=s;for(const id of ['title','story','pause','over','end'])$(id).classList.toggle('on',id===s);
+ $('hud').style.display=['title','story','end'].includes(s)?'none':'flex';
+ const b=document.querySelector('#'+s+' button');if(b)b.focus()}
+function die(msg){if(state!=='play')return;state='dead';deadT=.6;$('om').textContent=msg;burst(P.x+10,P.y+14,dim?'#ff8ad8':'#9fe',30,220);tone(200,.45,'sawtooth',.07,50)}
+function retry(){respawn();setState('play')}
+function win(){if(state!=='play')return;state='win';winT=lvl===3?1.8:.9;flash=1;flashC='#fff';[523,659,784,1047].forEach((f,i)=>setTimeout(()=>tone(f,.3,'triangle',.07),i*120))}
+function burst(x,y,c,n,sp=120){for(let i=0;i<n;i++){const a=Math.random()*6.28,s=Math.random()*sp;parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-30,l:.6,c})}}
+function startGame(){got.fill(0);loadLevel(0);setState('play')}
+$('bs').onclick=$('ba').onclick=startGame;
+$('bc').onclick=()=>{loadLevel(lvl+1);setState('play')};
+$('br').onclick=()=>setState('play');
+$('bq').onclick=()=>{loadLevel(lvl);setState('play')};
+$('bt').onclick=retry;
+$('bp').onmousedown=e=>e.preventDefault();
+$('bp').onclick=()=>{if(state==='play')setState('pause')};
+
+// ===== Camera + main update =====
+function update(dt){tm+=dt;flash=Math.max(0,flash-dt*1.6);rej=Math.max(0,rej-dt);rv+=((L.rv?1:0)-rv)*dt*1.5;
+ if(ring){ring.r+=700*dt;if(ring.r>300)ring=null}
+ for(const p of parts){p.l-=dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=240*dt}parts=parts.filter(p=>p.l>0);
+ if(state==='title'||state==='story')dim=(tm/2.5|0)%2; // sky flickers behind menus
+ if(state==='play')play(dt);
+ if(state==='dead'){deadT-=dt;if(deadT<=0)setState('over')}
+ if(state==='win'){winT-=dt;if(winT<=0){
+  if(lvl===3){$('et').textContent='Kael touches the Heart and remembers. The world was never broken. It was held too tightly by those who feared losing it. He lets go, and the two worlds fold into one. The sky turns to morning, and the village is no longer empty.';
+   $('es').textContent='Fragments recovered: '+got.reduce((a,b)=>a+b)+' / '+TOT;setState('end')}
+  else{$('st').textContent=L.name+' complete';$('sx').textContent=STORY[lvl];setState('story')}}}
+ const tx=Math.max(0,Math.min(L.w-W,P.x+10-W/2));cam+=(tx-cam)*Math.min(1,dt*8);
+ $('hd').textContent='World: '+(dim?'Fractured':'Awake');$('hd').style.color=rej>0?'#ff6a7a':dim?'#e2b8ff':'#8ff0e2';
+ $('hf').textContent='Fragments '+got.reduce((a,b)=>a+b)+' / '+TOT}
+
+// ===== Rendering and effects =====
+const TH=[
+{sky:['#0b2430','#2a6b6e'],far:'#164a52',mid:'#103840',near:'#0a272e',top:'#9cc4c4',face:'#4a6571',edge:'#26404a',acc:'#ffc56b',sp:'#e9eef2'},
+{sky:['#16072e','#6a1c86'],far:'#3d1266',mid:'#2d0c4f',near:'#1f0838',top:'#c78bff',face:'#3b1a66',edge:'#1c0b38',acc:'#ff4de0',sp:'#ff4fd8'}];
+const TH4=[
+{sky:['#10040c','#4a0f30'],far:'#2e0a22',mid:'#210718',near:'#15040f',top:'#d49a9a',face:'#4a3040',edge:'#2a1522',acc:'#ff9a6b',sp:'#f5e9ee'},
+{sky:['#08031c','#5a0a5e'],far:'#32084f',mid:'#220538',near:'#14032a',top:'#ff9bf0',face:'#3a1060',edge:'#150535',acc:'#ff2fb0',sp:'#ff4fd8'}];
+function glow(x,y,r,c,a){ctx.fillStyle=c;for(let k=4;k>0;k--){ctx.globalAlpha=a/4;ctx.beginPath();ctx.arc(x,y,r*k/4,0,6.3);ctx.fill()}ctx.globalAlpha=1}
+function ridge(f,base,amp,col,seed){ctx.fillStyle=col;ctx.beginPath();ctx.moveTo(0,H);const o=cam*f;
+ for(let x=0;x<=W+16;x+=16){const wx=x+o;ctx.lineTo(x,base-amp*(.5+.5*Math.sin(wx*.006+seed)*Math.sin(wx*.0023+seed*2))-18*Math.sin(wx*.017+seed))}
+ ctx.lineTo(W,H);ctx.fill()}
+function ruins(f,col,sp,seed,th){const o=cam*f,i0=Math.floor(o/sp);
+ for(let i=i0;i<=i0+W/sp+1;i++){const r=hash(i+seed),x=i*sp-o+r*50,h=70+r*150,w=24+hash(i*3+seed)*26;
+  ctx.fillStyle=col;ctx.fillRect(x,H-h,w,h);
+  if(r>.4)ctx.fillRect(x-6,H-h-8,w+12,8);else{ctx.beginPath();ctx.moveTo(x,H-h);ctx.lineTo(x+w*.6,H-h-26);ctx.lineTo(x+w,H-h);ctx.fill()}
+  if(dim?r>.55:r>.85){ctx.fillStyle=th.acc;ctx.globalAlpha=.7;ctx.fillRect(x+w/2-2,H-h+22,4,10);ctx.globalAlpha=1}}}
+function heartBg(th){const cx=W*.62-cam*.04,cy=190,R=70*(1+rv*.7)+Math.sin(tm*2)*5;
+ ctx.save();ctx.translate(cx,cy);ctx.strokeStyle=th.acc;ctx.globalAlpha=.1+.25*rv;ctx.lineWidth=3;
+ for(let i=0;i<14;i++){const a=i/14*6.283+tm*.1;ctx.beginPath();ctx.moveTo(Math.cos(a)*R,Math.sin(a)*R);ctx.lineTo(Math.cos(a)*(R+280),Math.sin(a)*(R+280));ctx.stroke()}
+ ctx.restore();ctx.globalAlpha=1;glow(cx,cy,R*2.2,th.acc,.6);ctx.fillStyle='#ffe0f0';ctx.beginPath();ctx.arc(cx,cy,R*.45,0,6.3);ctx.fill();
+ ctx.fillStyle=th.near;const m=W*1.4;
+ for(let i=0;i<10;i++){const x=((hash(i)*m-cam*.25+tm*6)%m+m)%m-100,y=60+hash(i+3)*300+Math.sin(tm+i)*12;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+14,y+8);ctx.lineTo(x+4,y+26);ctx.fill()}}
+function plat(s,th){if(s.x>cam+W||s.x+s.w<cam)return;const h=Math.min(s.h,H-s.y);
+ ctx.fillStyle=th.face;ctx.fillRect(s.x,s.y,s.w,h);ctx.fillStyle=th.edge;
+ for(let x=s.x+T;x<s.x+s.w;x+=T)ctx.fillRect(x-1,s.y,2,h);
+ for(let y=s.y+T;y<s.y+h;y+=T)ctx.fillRect(s.x,y-1,s.w,2);
+ ctx.fillStyle=th.top;ctx.fillRect(s.x,s.y,s.w,5);
+ if(dim){ctx.beginPath(); // Fractured: jagged crystal tops + glowing underside
+  for(let x=s.x;x<s.x+s.w;x+=16){ctx.moveTo(x,s.y);ctx.lineTo(x+8,s.y-3-hash(x)*6);ctx.lineTo(x+16,s.y)}ctx.fill();
+  ctx.fillStyle=th.acc;ctx.globalAlpha=.8;ctx.fillRect(s.x,s.y+h-3,s.w,3);ctx.globalAlpha=1}
+ else for(let x=s.x+4;x<s.x+s.w-8;x+=T)ctx.fillRect(x,s.y-2,T-8,2)} // Awake: soft rounded stone blocks
+function drawPlayer(){const x=P.x+10,y=P.y,moving=Math.abs(P.vx)>30,air=!P.g,ph=moving&&!air?Math.sin(tm*16):0,bob=!moving&&!air?Math.round(Math.sin(tm*3)):0;
+ ctx.save();ctx.translate(Math.round(x),Math.round(y));ctx.scale(P.face,1);
+ ctx.fillStyle='#1b2530';if(air){ctx.fillRect(-6,22,5,5);ctx.fillRect(1,20,5,5)}else{ctx.fillRect(Math.round(-6+ph*3),22,5,6);ctx.fillRect(Math.round(1-ph*3),22,5,6)}
+ ctx.fillStyle='#4aa9a0';ctx.fillRect(-6,13+bob,12,10);
+ ctx.fillStyle='#f0c9a0';ctx.fillRect(-5,3+bob,10,10);
+ ctx.fillStyle='#2a1c2e';ctx.fillRect(-6,0+bob,12,5);ctx.fillRect(-6,3+bob,3,6);
+ ctx.fillStyle='#fff';ctx.fillRect(1,7+bob,3,3);ctx.fillStyle='#10202a';ctx.fillRect(3,8+bob,1,2);
+ ctx.fillStyle=dim?'#ff4de0':'#ffc56b';ctx.fillRect(-6,12+bob,12,3);ctx.fillRect(-13,13+bob+Math.round(Math.sin(tm*8)*2),8,3); // scarf
+ ctx.restore();
+ if(rej>0){ctx.strokeStyle='#ff5a6a';ctx.globalAlpha=rej/.4;ctx.lineWidth=2;ctx.strokeRect(P.x-3,P.y-3,P.w+6,P.h+6);ctx.globalAlpha=1}}
+function render(){const th=(lvl===3?TH4:TH)[dim],oth=(lvl===3?TH4:TH)[1-dim];
+ const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,th.sky[0]);g.addColorStop(1,th.sky[1]);ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+ ctx.fillStyle='#fff';ctx.globalAlpha=.5;for(let i=0;i<40;i++)ctx.fillRect(hash(i)*W,hash(i+50)*H*.55,1.5,1.5);ctx.globalAlpha=1;
+ if(lvl===3)heartBg(th);
+ ridge(.1,380,150,th.far,1);ridge(.2,430,110,th.mid,3);ruins(.35,th.mid,210,7,th);ruins(.6,th.near,260,19,th);
+ ctx.save();ctx.translate(-Math.floor(cam),0);
+ for(const s of L.B)if(s.h>=T*4)for(let x=s.x+T*3;x<s.x+s.w-T;x+=T*9){ // lanterns / crystals
+  if(dim){ctx.fillStyle=th.acc;ctx.beginPath();ctx.moveTo(x,s.y);ctx.lineTo(x+5,s.y-26);ctx.lineTo(x+10,s.y);ctx.fill()}
+  else{ctx.fillStyle=th.edge;ctx.fillRect(x,s.y-24,3,24);glow(x+1,s.y-28,16,th.acc,.35);ctx.fillStyle=th.acc;ctx.fillRect(x-3,s.y-32,9,9)}}
+ ctx.strokeStyle=oth.top;ctx.lineWidth=2;ctx.setLineDash([6,6]);ctx.globalAlpha=.3; // ghost outlines of the other world
+ for(const s of dim?L.A:L.F)if(s.x<cam+W&&s.x+s.w>cam)ctx.strokeRect(s.x+1,s.y+1,s.w-2,Math.min(s.h,H-s.y)-2);
+ ctx.setLineDash([]);ctx.globalAlpha=1;
+ for(const s of L.solid[dim])plat(s,th);
+ for(const s of L.spk[dim]){ctx.fillStyle=th.sp;ctx.strokeStyle=dim?'#fff':'#ff5a5a';ctx.lineWidth=1.5;ctx.beginPath();
+  for(let i=0;i<s.n*2;i++){const x=s.tx+i*16;ctx.moveTo(x+1,s.ty+T);ctx.lineTo(x+8,s.ty+12);ctx.lineTo(x+15,s.ty+T)}ctx.fill();ctx.stroke()}
+ for(const c of L.cp){ctx.fillStyle=th.edge;ctx.fillRect(c.x+14,c.y-22,4,22);ctx.fillStyle=c.on?th.acc:'#667';
+  ctx.beginPath();ctx.moveTo(c.x+16,c.y-36);ctx.lineTo(c.x+23,c.y-27);ctx.lineTo(c.x+16,c.y-18);ctx.lineTo(c.x+9,c.y-27);ctx.fill();if(c.on)glow(c.x+16,c.y-27,22,th.acc,.4)}
+ for(const f of L.fr)if(!f.got){const y=f.y+Math.sin(tm*3+f.x)*3;glow(f.x,y,16,th.acc,.35);ctx.fillStyle='#fff3c0';
+  ctx.beginPath();ctx.moveTo(f.x,y-8);ctx.lineTo(f.x+6,y);ctx.lineTo(f.x,y+8);ctx.lineTo(f.x-6,y);ctx.fill()}
+ for(const d of L.dr)if(d.on<2){ctx.fillStyle=dim?'#8a4ab0':'#6a7a86';ctx.beginPath();ctx.moveTo(d.x,d.y);ctx.lineTo(d.x+20,d.y);ctx.lineTo(d.x+10,d.y+26);ctx.fill();ctx.fillStyle=th.top;ctx.fillRect(d.x,d.y,20,3)}
+ const e=L.ex,cx=e.x+16,cy=e.y+32,p=Math.sin(tm*4); // exit portal / the Heart
+ if(lvl===3){glow(cx,cy,90+p*6,'#ff2f8a',.7);ctx.fillStyle='#ffd0e8';ctx.beginPath();ctx.arc(cx,cy,18+p*2,0,6.3);ctx.fill();ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(cx,cy,9,0,6.3);ctx.fill()}
+ else{glow(cx,cy,60,th.acc,.5);ctx.fillStyle='#e8ffff';ctx.beginPath();ctx.ellipse(cx,cy,12+p,30,0,0,6.3);ctx.fill();
+  ctx.strokeStyle=th.top;ctx.lineWidth=3;ctx.beginPath();ctx.ellipse(cx,cy,17,35,0,0,6.3);ctx.stroke();
+  ctx.fillStyle=th.acc;ctx.beginPath();ctx.moveTo(cx-7,cy-52+p*3);ctx.lineTo(cx+7,cy-52+p*3);ctx.lineTo(cx,cy-42+p*3);ctx.fill()}
+ if(state!=='dead'&&state!=='over')drawPlayer();
+ if(ring){ctx.strokeStyle=th.acc;ctx.lineWidth=3;ctx.globalAlpha=Math.max(0,1-ring.r/300);ctx.beginPath();ctx.arc(ring.x,ring.y,ring.r,0,6.3);ctx.stroke();ctx.globalAlpha=1}
+ for(const q of parts){ctx.globalAlpha=Math.max(0,q.l/.6);ctx.fillStyle=q.c;ctx.fillRect(q.x,q.y,3,3)}ctx.globalAlpha=1;
+ ctx.restore();
+ if(lvl===2){const w=ctx.createLinearGradient(0,H-90,0,H);w.addColorStop(0,'rgba(20,90,110,0)');w.addColorStop(1,dim?'rgba(150,40,190,.55)':'rgba(30,140,160,.55)');ctx.fillStyle=w;ctx.fillRect(0,H-90,W,90)} // sunken water
+ ctx.fillStyle=th.acc;ctx.globalAlpha=.5;for(let i=0;i<30;i++){ // drifting motes
+  const x=(((hash(i)*W+tm*(8+hash(i+9)*10)-cam*(.3+hash(i+5)*.4))%W)+W)%W;ctx.fillRect(x,hash(i+2)*H+Math.sin(tm+i)*10,2,2)}ctx.globalAlpha=1;
+ const v=ctx.createRadialGradient(W/2,H/2,H*.45,W/2,H/2,H*.95);v.addColorStop(0,'rgba(0,0,0,0)');v.addColorStop(1,'rgba(0,0,0,.45)');ctx.fillStyle=v;ctx.fillRect(0,0,W,H);
+ if(flash>0){ctx.globalAlpha=Math.min(1,flash)*.5;ctx.fillStyle=flashC;ctx.fillRect(0,0,W,H);ctx.globalAlpha=1}}
+
+// ===== Main loop =====
+let last=0;
+function frame(t){const dt=Math.min(.033,(t-last)/1000||0);last=t;update(dt);render();requestAnimationFrame(frame)}
+resize();loadLevel(0);setState('title');requestAnimationFrame(frame);
+</script></body></html>
